@@ -177,7 +177,33 @@ export function countLinks(data: WebstackCategory[]): number {
   return data.reduce((total, category) => total + (category.links?.length ?? category.friend?.length ?? 0) + (category.list?.reduce((sum, section) => sum + section.links.length, 0) ?? 0), 0);
 }
 
+let schemaReady: Promise<void> | undefined;
+
+export async function ensureSchema(): Promise<void> {
+  if (!schemaReady) {
+    const d1 = getD1();
+    schemaReady = (async () => {
+      await d1.batch([
+        d1.prepare("CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, name TEXT NOT NULL, name_en TEXT, icon TEXT, mode TEXT NOT NULL, sort_order INTEGER DEFAULT 0 NOT NULL)"),
+        d1.prepare("CREATE TABLE IF NOT EXISTS sections (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE, name TEXT NOT NULL, name_en TEXT, sort_order INTEGER DEFAULT 0 NOT NULL)"),
+        d1.prepare("CREATE TABLE IF NOT EXISTS links (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE, section_id INTEGER REFERENCES sections(id) ON DELETE CASCADE, kind TEXT DEFAULT 'link' NOT NULL, title TEXT NOT NULL, title_en TEXT, url TEXT NOT NULL, description TEXT, description_en TEXT, logo TEXT, qrcode TEXT, translations TEXT, sort_order INTEGER DEFAULT 0 NOT NULL)"),
+        d1.prepare("CREATE INDEX IF NOT EXISTS idx_sections_category_sort ON sections(category_id, sort_order)"),
+        d1.prepare("CREATE INDEX IF NOT EXISTS idx_links_category_section_sort ON links(category_id, section_id, sort_order)")
+      ]);
+      const columns = await d1.prepare("PRAGMA table_info(links)").all<{ name: string }>();
+      if (!columns.results.some((column) => column.name === "translations")) {
+        await d1.prepare("ALTER TABLE links ADD COLUMN translations TEXT").run();
+      }
+    })().catch((error: unknown) => {
+      schemaReady = undefined;
+      throw error;
+    });
+  }
+  await schemaReady;
+}
+
 export async function readWebstack(): Promise<WebstackCategory[]> {
+  await ensureSchema();
   const db = getDb();
   const [categoryRows, sectionRows, linkRows] = await Promise.all([
     db.select().from(categoriesTable).orderBy(asc(categoriesTable.sortOrder), asc(categoriesTable.id)),
@@ -210,6 +236,7 @@ export async function readWebstack(): Promise<WebstackCategory[]> {
 
 export async function findSiteById(id: number): Promise<SiteDetailRecord | null> {
   if (!Number.isSafeInteger(id) || id <= 0) return null;
+  await ensureSchema();
   const row = await getD1().prepare(`SELECT
       l.id, l.title, l.title_en, l.url, l.description, l.description_en, l.logo, l.qrcode, l.translations,
       c.name AS category_name, c.name_en AS category_name_en,
@@ -239,6 +266,7 @@ function linksIn(data: WebstackCategory[]): LinkItem[] {
 export async function replaceWebstack(value: unknown) {
   const data = normalizeWebstack(value);
   const d1 = getD1();
+  await ensureSchema();
   const statements: D1PreparedStatement[] = [d1.prepare("DELETE FROM links"), d1.prepare("DELETE FROM sections"), d1.prepare("DELETE FROM categories")];
   const existingIds = linksIn(data).map((link) => link.id).filter((id): id is number => Number.isSafeInteger(id) && Number(id) > 0);
   const usedIds = new Set<number>();
@@ -276,6 +304,7 @@ let seedReady: Promise<void> | undefined;
 export async function ensureSeeded(): Promise<void> {
   if (!seedReady) {
     seedReady = (async () => {
+      await ensureSchema();
       const row = await getD1().prepare("SELECT COUNT(*) AS count FROM categories").first<{ count: number }>();
       if (Number(row?.count ?? 0) === 0) await replaceWebstack(seedData);
     })().catch((error: unknown) => {
