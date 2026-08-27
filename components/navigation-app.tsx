@@ -56,7 +56,7 @@ export function NavigationApp() {
   const [activeCategory, setActiveCategory] = useState("all");
 
   useEffect(() => {
-    fetch("/api/data", { cache: "no-store" })
+    fetch("/api/data")
       .then(async (response) => {
         const body = await response.json();
         if (!response.ok) throw new Error(body.error || m.loadFailed);
